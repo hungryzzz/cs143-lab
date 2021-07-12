@@ -2047,7 +2047,7 @@ label149:
 	jal	IO_init
 	bne	$a0 $zero label151
 	la	$a0 str_const2
-	li	$t1 222
+	li	$t1 223
 	jal	_dispatch_abort
 label151:
 	lw	$t1 8($a0)
@@ -2058,7 +2058,7 @@ label151:
 	jal	IO_init
 	bne	$a0 $zero label152
 	la	$a0 str_const2
-	li	$t1 223
+	li	$t1 224
 	jal	_dispatch_abort
 label152:
 	lw	$t1 8($a0)
@@ -2070,7 +2070,7 @@ label152:
 	move	$a0 $s0
 	bne	$a0 $zero label153
 	la	$a0 str_const2
-	li	$t1 224
+	li	$t1 225
 	jal	_dispatch_abort
 label153:
 	lw	$t1 8($a0)

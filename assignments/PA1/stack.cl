@@ -216,6 +216,7 @@ class Main inherits A2I {
    };
 
    main() : Object {
+      -- { (new IO).out_string("nothing implemented\n"); }
       let inString: String in {
          while (true) loop
          {
