@@ -83,7 +83,7 @@
     Program ast_root;	      /* the result of the parse  */
     Classes parse_results;        /* for use in semantic analysis */
     int omerrs = 0;               /* number of errors in lexing and parsing */
-    %}
+%}
     
     /* A union of all the types that can be the result of parsing actions. */
     %union {
@@ -136,9 +136,27 @@
     
     /* You will want to change the following line. */
     %type <features> dummy_feature_list
+    %type <feature> dummy_feature
+    %type <formals> formal_list
+    %type <formal> formal
+    %type <cases> case_list
+    %type <case_> case
+    %type <expressions> block_expression_list
+    %type <expressions>  dispatch_expression_list
+    %type <expression> expression
+    %type <expression> let_expression
     
     /* Precedence declarations go here. */
-    
+    %left ASSIGN
+    %left NOT
+    %nonassoc '<' LE '='
+    %left '+' '-'
+    %left '*' '/'
+    %left '~'
+    %left '.'
+    %left ISVOID
+    %left '@'
+
     
     %%
     /* 
@@ -150,23 +168,158 @@
     class_list
     : class			/* single class */
     { $$ = single_Classes($1);
-    parse_results = $$; }
+      parse_results = $$; }
     | class_list class	/* several classes */
     { $$ = append_Classes($1,single_Classes($2)); 
-    parse_results = $$; }
+      parse_results = $$; }
     ;
     
     /* If no parent is specified, the class inherits from the Object class. */
     class	: CLASS TYPEID '{' dummy_feature_list '}' ';'
     { $$ = class_($2,idtable.add_string("Object"),$4,
     stringtable.add_string(curr_filename)); }
-    | CLASS TYPEID INHERITS TYPEID '{' dummy_feature_list '}' ';'
+    | CLASS TYPEID INHERITS TYPEID '{' dummy_feature_list '}' ';'   /* Inherit class */
     { $$ = class_($2,$4,$6,stringtable.add_string(curr_filename)); }
+    | CLASS error ';' class 
+    { $$ = $4; }
     ;
     
     /* Feature list may be empty, but no empty features in list. */
+
     dummy_feature_list:		/* empty */
-    {  $$ = nil_Features(); }
+    { $$ = nil_Features(); }
+    | dummy_feature /* single feature */
+    { $$ = single_Features($1); }
+    | dummy_feature_list dummy_feature  /* several features */
+    { $$ = append_Features($1, single_Features($2)); }
+    | dummy_feature_list error ';'
+    ;
+
+    dummy_feature: OBJECTID '(' ')' ':' TYPEID '{' expression '}' ';'  /* function without params */
+    { $$ = method($1, nil_Formals(), $5, $7); }
+    | OBJECTID '(' formal_list ')' ':' TYPEID '{' expression '}' ';' /* function with param(s) */
+    { $$ = method($1, $3, $6, $8); }
+    | OBJECTID ':' TYPEID ';' /* identify definition without initialization */
+    { $$ = attr($1, $3, no_expr()); }
+    | OBJECTID ':' TYPEID ASSIGN expression ';' /* identify definition with initialization */
+    { $$ = attr($1, $3, $5); }
+    | OBJECTID error ';' dummy_feature
+    { $$ = $4; }
+    ;
+
+    formal_list: formal /* single formal */
+    { $$ = single_Formals($1); }
+    | formal_list ',' formal /* several formal */
+    { $$ = append_Formals($1, single_Formals($3)); }
+    ;
+
+    formal: OBJECTID ':' TYPEID
+    { $$ = formal($1, $3); }
+    ;
+
+    block_expression_list: expression ';'  /* single expression */
+    { $$ = single_Expressions($1); }
+    | block_expression_list expression ';' /* several expressions */
+    { $$ = append_Expressions($1, single_Expressions($2)); }
+    | block_expression_list error ';'
+    { $$ = $1; }
+    ;
+
+    dispatch_expression_list: expression /* single expression */
+    { $$ = single_Expressions($1); }
+    | dispatch_expression_list ',' expression /* several expressions */
+    { $$ = append_Expressions($1, single_Expressions($3)); }
+    ;
+
+    let_expression: OBJECTID ':' TYPEID IN expression
+    { $$ = let($1, $3, no_expr(), $5); }
+    | OBJECTID ':' TYPEID ASSIGN expression IN expression
+    { $$ = let($1, $3, $5, $7); }
+    | OBJECTID ':' TYPEID ',' let_expression
+    { $$ = let($1, $3, no_expr(), $5); }
+    | OBJECTID ':' TYPEID ASSIGN expression ',' let_expression
+    { $$ = let($1, $3, $5, $7); }
+    | error ',' let_expression
+    { $$ = $3; }
+    ;
+ 
+    case_list: case  /* single case */
+    { $$ = single_Cases($1); }
+    | case_list case /* several cases */
+    { $$ = append_Cases($1, single_Cases($2)); }
+    ;
+
+    case: OBJECTID ':' TYPEID DARROW expression ';'
+    { $$ = branch($1, $3, $5); }
+    ;
+
+    expression: OBJECTID ASSIGN expression  /* assign */
+    { $$ = assign($1, $3); }
+
+    | expression '@' TYPEID '.' OBJECTID '(' ')'  /* static dispatch with type without expressions */
+    { $$ = static_dispatch($1, $3, $5, nil_Expressions()); }
+    | expression '.' OBJECTID '(' ')'  /* dispatch without type & expressions */
+    { $$ = dispatch($1, $3, nil_Expressions()); }
+    | OBJECTID '(' ')'  /* dispatch without expressions */
+    { $$ = dispatch(object(idtable.add_string("self")), $1, nil_Expressions()); }
+
+    | expression '@' TYPEID '.' OBJECTID '(' dispatch_expression_list ')'  /* static dispatch with type */
+    { $$ = static_dispatch($1, $3, $5, $7); }
+    | expression '.' OBJECTID '(' dispatch_expression_list ')'  /* dispatch without type */
+    { $$ = dispatch($1, $3, $5); }
+    | OBJECTID '(' dispatch_expression_list ')'  /* dispatch */
+    { $$ = dispatch(object(idtable.add_string("self")), $1, $3); }
+
+    | IF expression THEN expression ELSE expression FI /* if else branch */
+    { $$ = cond($2, $4, $6); }
+    | WHILE expression LOOP expression POOL /* while loop */
+    { $$ = loop($2, $4); }
+    | '{' block_expression_list '}' /* block */
+    { $$ = block($2); }
+
+    | LET let_expression  /* let */
+    { $$ = $2; }
+
+    | CASE expression OF case_list ESAC /* case */
+    { $$ = typcase($2, $4); }
+
+    | NEW TYPEID   /* new */
+    { $$ = new_($2); }
+    | ISVOID expression /* isvoid */
+    { $$ = isvoid($2); }
+
+    | expression '+' expression /* add */
+    { $$ = plus($1, $3); }
+    | expression '-' expression /* sub */
+    { $$ = sub($1, $3); }
+    | expression '*' expression /* multiple */
+    { $$ = mul($1, $3); }
+    | expression '/' expression /* divider */
+    { $$ = divide($1, $3); }
+    | '~' expression /* negtive */
+    { $$ = neg($2); }
+
+    | expression '<' expression /* less than */
+    { $$ = lt($1, $3); }
+    | expression '=' expression /* equal */
+    { $$ = eq($1, $3); }
+    | expression LE expression /* less than or equal */
+    { $$ = leq($1, $3); }
+    | NOT expression  /* not */
+    { $$ = comp($2); }
+    | '(' expression ')' /* (expr) */
+    { $$ = $2; }
+
+    | OBJECTID /* ID */
+    { $$ = object($1); }
+    | INT_CONST /* integer */
+    { $$ = int_const($1); }
+    | STR_CONST /* string */
+    { $$ = string_const($1); }
+    | BOOL_CONST /* boolean */
+    { $$ = bool_const($1); }
+    ;
+
     
     
     /* end of grammar */
