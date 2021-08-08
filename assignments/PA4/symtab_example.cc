@@ -23,7 +23,8 @@ int main(int argc, char *argv[]) {
   // add a scope, add more names:
   map->enterscope();
   map->addid(Miguel, new int(35));
-  map->addid(Mary, new int(23));
+  // map->addid(Mary, new int(23));
+  // map->addid(Mary, new int(33));
 
   // check whether Fred is in the current scope; predicate is false
   cout << ((map->probe(Fred) != NULL) ? "Yes\n" : "No\n");
