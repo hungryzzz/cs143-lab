@@ -5,11 +5,16 @@
 #define COOL_TREE_HANDCODE_H
 
 #include <iostream>
+#include <vector>
+#include <map>
 #include "tree.h"
 #include "cool.h"
 #include "stringtab.h"
 #define yylineno curr_lineno;
 extern int yylineno;
+
+using std::vector;
+using std::map;
 
 inline Boolean copy_Boolean(Boolean b) {return b; }
 inline void assert_Boolean(Boolean) {}
@@ -44,6 +49,17 @@ typedef Expressions_class *Expressions;
 typedef list_node<Case> Cases_class;
 typedef Cases_class *Cases;
 
+class CgenNode;
+class CgenClassTable;
+typedef struct Env {
+   /* data */
+	CgenNode *curr_node;
+	CgenClassTable *ct;
+	vector<Symbol> params_table;
+	map<Symbol, int> vars_table;
+	int stack_num;
+} env;
+
 #define Program_EXTRAS                          \
 virtual void cgen(ostream&) = 0;		\
 virtual void dump_with_types(ostream&, int) = 0; 
@@ -69,40 +85,56 @@ void dump_with_types(ostream&,int);
 
 
 #define Feature_EXTRAS                                        \
-virtual void dump_with_types(ostream&,int) = 0; 
+virtual void dump_with_types(ostream&,int) = 0;               \
+virtual bool is_method() = 0;                                 \
+virtual Symbol get_name() = 0;                                \
+virtual Symbol get_type() = 0;                                \
+virtual void code_init(ostream& str, env& e) = 0;                      
 
 
 #define Feature_SHARED_EXTRAS                                       \
-void dump_with_types(ostream&,int);    
+void dump_with_types(ostream&,int);                                 \
+bool is_method();                                                   \
+Symbol get_name() { return name; }                                  \
+Symbol get_type();                                                  \
+void code_init(ostream& str, env& e);                                         
 
 
 #define Formal_EXTRAS                              \
-virtual void dump_with_types(ostream&,int) = 0;
+virtual void dump_with_types(ostream&,int) = 0;    \
+virtual void code(ostream&, env&) = 0;
 
 
 #define formal_EXTRAS                           \
-void dump_with_types(ostream&,int);
+void dump_with_types(ostream&,int);             \
+void code(ostream&, env&);
 
 
 #define Case_EXTRAS                             \
-virtual void dump_with_types(ostream& ,int) = 0;
+virtual void dump_with_types(ostream& ,int) = 0; \
+virtual Symbol get_name() = 0;                   \
+virtual Symbol get_type() = 0;                   \
+virtual void code(ostream&, env&) = 0;
 
 
 #define branch_EXTRAS                                   \
-void dump_with_types(ostream& ,int);
+void dump_with_types(ostream& ,int);                    \
+Symbol get_name() { return name; }                      \
+Symbol get_type() { return type_decl; }                 \
+void code(ostream&, env&);
 
 
 #define Expression_EXTRAS                    \
 Symbol type;                                 \
 Symbol get_type() { return type; }           \
 Expression set_type(Symbol s) { type = s; return this; } \
-virtual void code(ostream&) = 0; \
+virtual void code(ostream&, env&) = 0; \
 virtual void dump_with_types(ostream&,int) = 0;  \
 void dump_type(ostream&, int);               \
 Expression_class() { type = (Symbol) NULL; }
 
 #define Expression_SHARED_EXTRAS           \
-void code(ostream&); 			   \
+void code(ostream&, env&); 			   \
 void dump_with_types(ostream&,int); 
 
 

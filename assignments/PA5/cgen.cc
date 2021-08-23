@@ -28,6 +28,8 @@
 extern void emit_string_constant(ostream& str, char *s);
 extern int cgen_debug;
 
+int label_num = 0;
+
 //
 // Three symbols from the semantic analyzer (semant.cc) are used.
 // If e : No_type, then no code is generated for e.
@@ -322,6 +324,9 @@ static void emit_push(char *reg, ostream& str)
   emit_addiu(SP,SP,-4,str);
 }
 
+static void emit_fetch_bool(char *dest, char *source, ostream& s)
+{ emit_load(dest, DEFAULT_OBJFIELDS, source, s); }
+
 //
 // Fetch the integer value in an Int object.
 // Emits code to fetch the integer value of the Integer object pointed
@@ -403,7 +408,7 @@ void StringEntry::code_def(ostream& s, int stringclasstag)
 
 
  /***** Add dispatch information for class String ******/
-
+      s << STRINGNAME << DISPTAB_SUFFIX;
       s << endl;                                              // dispatch table
       s << WORD;  lensym->code_ref(s);  s << endl;            // string length
   emit_string_constant(s,str);                                // ascii string
@@ -445,7 +450,7 @@ void IntEntry::code_def(ostream &s, int intclasstag)
       << WORD; 
 
  /***** Add dispatch information for class Int ******/
-
+      s << INTNAME << DISPTAB_SUFFIX;
       s << endl;                                          // dispatch table
       s << WORD << str << endl;                           // integer value
 }
@@ -489,7 +494,7 @@ void BoolConst::code_def(ostream& s, int boolclasstag)
       << WORD;
 
  /***** Add dispatch information for class Bool ******/
-
+      s << BOOLNAME << DISPTAB_SUFFIX;
       s << endl;                                            // dispatch table
       s << WORD << val << endl;                             // value (0 or 1)
 }
@@ -616,21 +621,140 @@ void CgenClassTable::code_constants()
   code_bools(boolclasstag);
 }
 
+void CgenClassTable::code_class_name_table() {
+  //
+  // Add class name to string constant tag, should be ordered by class tag 
+  //
+  str << CLASSNAMETAB << LABEL;
+  for (size_t i = 0; i < classtag_vec.size(); ++i) {
+    str << WORD;
+    stringtable.lookup_string(classtag_vec[i]->get_name()->get_string())->code_ref(str);
+    str << endl;
+  }
+}
 
-CgenClassTable::CgenClassTable(Classes classes, ostream& s) : nds(NULL) , str(s)
-{
-   stringclasstag = 0 /* Change to your String class tag here */;
-   intclasstag =    0 /* Change to your Int class tag here */;
-   boolclasstag =   0 /* Change to your Bool class tag here */;
+void CgenClassTable::code_class_object_table() {
+  //
+  // Add class object: prototype object & initialization method
+  //
+  str << CLASSOBJTAB << LABEL;
+  for (size_t i = 0; i < classtag_vec.size(); ++i) {
+    Symbol class_name = classtag_vec[i]->get_name();
+    str << WORD; emit_protobj_ref(class_name, str); str << endl;
+    str << WORD; emit_init_ref(class_name, str); str << endl;
+  }
+}
 
-   enterscope();
-   if (cgen_debug) cout << "Building CgenClassTable" << endl;
-   install_basic_classes();
-   install_classes(classes);
-   build_inheritance_tree();
+void CgenClassTable::code_object_layout_table() {
+  //
+  // Add every object layout & dispatch method table
+  //
+  for (List<CgenNode> *l = nds; l; l = l->tl()) {
+    // code dispatch table
+    l->hd()->code_disp_table(str);
+    //  code proto table
+    l->hd()->code_proto_table(str);
+  }
+}
 
-   code();
-   exitscope();
+void CgenClassTable::code_object_init() {
+  // 
+  // Add every object init code
+  // 
+  for (List<CgenNode> *l = nds; l; l = l->tl()) {
+    CgenNode *curr_node = l->hd();
+
+    emit_init_ref(curr_node->get_name(), str); str << LABEL;
+    
+     // Save context
+    emit_addiu(SP, SP, -12, str);
+    emit_store(FP, 3, SP, str);
+    emit_store(SELF, 2, SP, str);
+    emit_store(RA, 1, SP, str);
+    // update frame point
+    emit_addiu(FP, SP, 4, str);
+    // save current object instance
+    emit_move(SELF, ACC, str);
+    // init parent
+    Symbol parent = curr_node->get_parent();
+    if (parent != No_class) {
+      str << JAL; emit_init_ref(parent, str); str << endl;
+    }
+    // attributes init
+    curr_node->code_features(str, true, this);
+
+    // recover context
+    emit_move(ACC, SELF, str);
+    emit_load(FP, 3, SP, str);
+    emit_load(SELF, 2, SP, str);
+    emit_load(RA, 1, SP, str);
+    emit_addiu(SP, SP, 12, str);
+    
+    // return
+    emit_return(str);
+  }
+}
+
+void CgenClassTable::code_object_methods() {
+  // 
+  // Add every object methods
+  // 
+  for (List<CgenNode> *l = nds; l; l = l->tl()) {
+    l->hd()->code_features(str, false, this);
+  }
+}
+
+void CgenClassTable::visit_object(CgenNodeP nd, vector<CgenNodeP>& prefix_nd, int& visit_num) {
+  // 
+  // DFS class tree
+  // 
+  ++visit_num;
+  Symbol class_name = nd->get_name();
+
+  // collect parent features info
+  for (auto item: prefix_nd) {
+    item->add_features_to_child(nd);
+  }
+  nd->set_parent_attrs_num((int)nd->attrs_including_inherits.size());
+  nd->add_features_to_child(nd);
+
+  classtag_map[class_name] = visit_num;
+  classtag_vec.push_back(nd);
+  nd->set_class_tag(visit_num);
+
+  if (nd->get_children() != NULL) {
+    prefix_nd.push_back(nd);
+    for (List<CgenNode> *l = nd->get_children(); l; l = l->tl()) {
+      visit_object(l->hd(), prefix_nd, visit_num);
+    }
+    prefix_nd.pop_back();
+  }
+  smallest_classtag[class_name] = visit_num;
+}
+
+
+CgenClassTable::CgenClassTable(Classes classes, ostream& s) : nds(NULL) , str(s) {
+
+  enterscope();
+  if (cgen_debug) cout << "Building CgenClassTable" << endl;
+  install_basic_classes();
+  install_classes(classes);
+  build_inheritance_tree();
+
+
+  vector<CgenNodeP> prefix_nd;
+  int visit_num = -1;
+  visit_object(root(), prefix_nd, visit_num);
+  // for (map<Symbol, int>::iterator it = classtag_map.begin(); it != classtag_map.end(); ++it) {
+  //   cout << it->first << ' ' << it->second << ' ' << smallest_classtag[it->first] << endl;
+  // }
+
+  stringclasstag = classtag_map[Str];
+  intclasstag = classtag_map[Int];
+  boolclasstag = classtag_map[Bool];
+
+  code();
+  exitscope();
 }
 
 void CgenClassTable::install_basic_classes()
@@ -815,7 +939,120 @@ void CgenNode::set_parentnd(CgenNodeP p)
   parentnd = p;
 }
 
+void CgenNode::add_features_to_child(CgenNodeP child) {
+  for (int i = features->first(); features->more(i); i = features->next(i)) {
+    Feature f = features->nth(i);
+    if (f->is_method()) {
+      int exist_index = child->find_method_by_name(f->get_name());
+      if (exist_index != -1) {
+        // if method is exist, update
+        child->update_method(exist_index, name, f);
+      } else {
+        // add method
+        child->add_method(name, f);
+      }
+    } else {
+      // add attribute
+      child->add_attr(f);
+    }
+  }
+}
 
+void CgenNode::code_disp_table(ostream& str) {
+  emit_disptable_ref(name, str); str << LABEL;
+  for (disp_method* pm: methods_including_inherits) {
+    str << WORD; emit_method_ref(pm->disp_class_name, pm->disp_method->get_name(), str); str << endl;
+  }
+}
+
+void CgenNode::code_proto_table(ostream& str) {
+  str << WORD << "-1" << endl;
+  emit_protobj_ref(name, str); str << LABEL;
+  str << WORD << class_tag << endl;  // object unique index
+  str << WORD << attrs_including_inherits.size() + 3 << endl;  //  object size
+  str << WORD;  emit_disptable_ref(name, str); str << endl; //  object dispatch method
+  // attributes default value
+  for (Feature ac: attrs_including_inherits) {
+    str << WORD;
+    Symbol attr_type = ac->get_type();
+    if (attr_type == Int) {
+      inttable.lookup_string("0")->code_ref(str);
+    } else if (attr_type == Bool) {
+      falsebool.code_ref(str);
+    } else if (attr_type == Str) {
+      stringtable.lookup_string("")->code_ref(str);
+    } else {
+      str << "0";
+    }
+    str << endl;
+  }
+}
+
+void CgenNode::code_features(ostream& str, bool is_attr, CgenClassTable* ct) {
+  for (int i = features->first(); features->more(i); i = features->next(i)) {
+    Feature f = features->nth(i);
+    env e;
+    e.curr_node = this;
+    e.ct = ct;
+    e.stack_num = 0;
+    if (f->is_method() && !is_attr && !basic()) {
+      // code method
+      f->code_init(str, e);
+    } else if (!f->is_method() && is_attr) {
+      // code attribute
+      f->code_init(str, e);
+    }
+  }
+}
+
+
+bool method_class::is_method() { return true; }
+bool attr_class::is_method() { return false; }
+
+Symbol method_class::get_type() { return return_type; }
+Symbol attr_class::get_type() { return type_decl; }
+
+void method_class::code_init(ostream& str, env& e) {
+  emit_method_ref(e.curr_node->get_name(), name, str); str << LABEL;
+  // save context
+  emit_addiu(SP, SP, -12, str);
+  emit_store(FP, 3, SP, str);
+  emit_store(SELF, 2, SP, str);
+  emit_store(RA, 1, SP, str);
+  // update frame point
+  emit_addiu(FP, SP, 4, str);
+  // save current object instance
+  emit_move(SELF, ACC, str);
+
+  // add formals
+  for (int i = formals->first(); formals->more(i); i = formals->next(i)) {
+    formals->nth(i)->code(str, e);
+  }
+
+  // code expr
+  expr->code(str, e);
+
+  // recover context
+  emit_load(FP, 3, SP, str);
+  emit_load(SELF, 2, SP, str);
+  emit_load(RA, 1, SP, str);
+  emit_addiu(SP, SP, 12 + formals->len() * WORD_SIZE, str);
+
+  // return
+  emit_return(str);
+}
+
+void attr_class::code_init(ostream& str, env& e) {
+  if (!init->is_empty()) {
+    init->code(str, e);
+    int index = e.curr_node->find_attr_by_name(name);
+    emit_store(ACC, DEFAULT_OBJFIELDS + index, SELF, str);
+  }
+}
+
+void formal_class::code(ostream& str, env& e) {
+  e.params_table.push_back(name);
+}
 
 void CgenClassTable::code()
 {
@@ -833,6 +1070,14 @@ void CgenClassTable::code()
 //                   - class_nameTab
 //                   - dispatch tables
 //
+  if (cgen_debug) cout << "coding class name table" << endl;
+  code_class_name_table();
+
+  if (cgen_debug) cout << "coding class object table" << endl;
+  code_class_object_table();
+
+  if (cgen_debug) cout << "coding class dispatch and proto table" << endl;
+  code_object_layout_table();
 
   if (cgen_debug) cout << "coding global text" << endl;
   code_global_text();
@@ -841,7 +1086,11 @@ void CgenClassTable::code()
 //                   - object initializer
 //                   - the class methods
 //                   - etc...
+  if (cgen_debug) cout << "coding class object initializer" << endl;
+  code_object_init();
 
+  if (cgen_debug) cout << "coding class object method" << endl;
+  code_object_methods();
 }
 
 
@@ -866,7 +1115,31 @@ CgenNode::CgenNode(Class_ nd, Basicness bstatus, CgenClassTableP ct) :
    stringtable.add_string(name->get_string());          // Add class name to string table
 }
 
+///////////////////////////////////////////////////////////////////////
+//
+// Env help functions
+//
+///////////////////////////////////////////////////////////////////////
 
+int find_param_in_env(Symbol p, env& e) {
+  for (size_t i = 0; i < e.params_table.size(); ++i) {
+    if (e.params_table[i] == p) {
+      return e.params_table.size() - i - 1;
+    }
+  }
+  return -1;
+}
+
+int find_attr_in_env(Symbol a, env& e) {
+  return e.curr_node->find_attr_by_name(a);
+}
+
+int find_var_in_env(Symbol v, env& e) {
+  if (e.vars_table.find(v) != e.vars_table.end()) {
+    return e.stack_num - e.vars_table[v];
+  }
+  return -1;
+}
 //******************************************************************
 //
 //   Fill in the following methods to produce code for the
@@ -877,58 +1150,378 @@ CgenNode::CgenNode(Class_ nd, Basicness bstatus, CgenClassTableP ct) :
 //
 //*****************************************************************
 
-void assign_class::code(ostream &s) {
+void assign_class::code(ostream &s, env& e) {
+  // execute assign expression
+  expr->code(s, e);
+  
+  // result is in ACC
+  int idx;
+  
+  if ((idx = find_var_in_env(name, e)) != -1) {
+    emit_store(ACC, idx, SP, s);
+  } else if ((idx = find_param_in_env(name, e)) != -1) {
+    emit_store(ACC, FRAME_PARAMS + idx, FP, s);
+  } else if ((idx = find_attr_in_env(name, e)) != -1) {
+    emit_store(ACC, DEFAULT_OBJFIELDS + idx, SELF, s);
+  } else {
+    cout << "Can't find assign variable!" << endl;
+  }
+  
 }
 
-void static_dispatch_class::code(ostream &s) {
+void static_dispatch_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+  // push params
+  for (int i = actual->first(); actual->more(i); i = actual->next(i)) {
+    actual->nth(i)->code(s, e);
+    emit_push(ACC, s);
+    ++e.stack_num;
+  }
+
+  expr->code(s, e);
+
+  emit_bne(ACC, ZERO, true_label, s);
+  emit_partial_load_address(ACC, s); stringtable.lookup_string(e.curr_node->get_filename()->get_string())->code_ref(s); s << endl;
+  emit_load_imm(T1, this->get_line_number(), s);
+  emit_jal("_dispatch_abort", s);
+
+  emit_label_def(true_label, s);
+
+  emit_partial_load_address(T1, s); emit_disptable_ref(type_name, s); s << endl;
+  int idx = e.ct->get_class_node(type_name)->find_method_by_name(name);
+  if (idx != -1) {
+    emit_load(T1, idx, T1, s);
+    emit_jalr(T1, s);
+  }
+  e.stack_num -= actual->len();
 }
 
-void dispatch_class::code(ostream &s) {
+void dispatch_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+  // push params
+  for (int i = actual->first(); actual->more(i); i = actual->next(i)) {
+    actual->nth(i)->code(s, e);
+    emit_push(ACC, s);
+    ++e.stack_num;
+  }
+
+  expr->code(s, e);
+
+  emit_bne(ACC, ZERO, true_label, s);
+  emit_partial_load_address(ACC, s); stringtable.lookup_string(e.curr_node->get_filename()->get_string())->code_ref(s); s << endl;
+  emit_load_imm(T1, this->get_line_number(), s);
+  emit_jal("_dispatch_abort", s);
+
+  emit_label_def(true_label, s);
+  emit_load(T1, DISPTABLE_OFFSET, ACC, s);
+
+  CgenNodeP c_n = e.curr_node;
+  if (expr->get_type() != SELF_TYPE) {
+    c_n = e.ct->get_class_node(expr->get_type());
+  }
+  int idx = c_n->find_method_by_name(name);
+  if (idx != -1) {
+    emit_load(T1, idx, T1, s);
+    emit_jalr(T1, s);
+  }
+  e.stack_num -= actual->len();
 }
 
-void cond_class::code(ostream &s) {
+void cond_class::code(ostream &s, env& e) {
+  int ret_label = label_num++;
+  int false_branch_label = label_num++;
+  pred->code(s, e);
+
+  // true branch
+  emit_fetch_bool(T1, ACC, s);
+  emit_beqz(T1, false_branch_label, s);
+  then_exp->code(s, e);
+  emit_branch(ret_label, s);
+
+  // false branch
+  emit_label_def(false_branch_label, s);
+  else_exp->code(s, e);
+
+  // return
+  emit_label_def(ret_label, s);
 }
 
-void loop_class::code(ostream &s) {
+void loop_class::code(ostream &s, env& e) {
+  // branch condition
+  int condition_label = label_num++;
+  int false_branch_label = label_num++;
+  emit_label_def(condition_label, s);
+  pred->code(s, e);
+
+  // true branch
+  emit_fetch_bool(T1, ACC, s);  
+  emit_beqz(T1, false_branch_label, s);
+  body->code(s, e);
+  emit_branch(condition_label, s);
+  
+  // false branch
+  emit_label_def(false_branch_label, s);
+  emit_move(ACC, ZERO, s);
 }
 
-void typcase_class::code(ostream &s) {
+bool cmp(const pair<Case, int>& p1, const pair<Case, int>& p2) {
+  return p1.second > p2.second;
 }
 
-void block_class::code(ostream &s) {
+void branch_class::code(ostream &s, env& e) {
+  expr->code(s, e);
 }
 
-void let_class::code(ostream &s) {
+void typcase_class::code(ostream &s, env& e) {
+  expr->code(s, e);
+  int ret_label = label_num++;
+  int no_viod_label = label_num++;
+
+  emit_bne(ACC, ZERO, no_viod_label, s);
+  emit_partial_load_address(ACC, s); stringtable.lookup_string(e.curr_node->get_filename()->get_string())->code_ref(s); s << endl;
+  emit_load_imm(T1, this->get_line_number(), s);
+  emit_jal("_case_abort2", s);
+
+  emit_label_def(no_viod_label, s);
+  emit_load(T3, 0, ACC, s);
+
+  vector<pair<Case, int>> ordered_cases;
+  for (int i = cases->first(); cases->more(i); i = cases->next(i)) {
+    Case c = cases->nth(i);
+    ordered_cases.push_back(make_pair(c, e.ct->find_classtag(c->get_type())));
+  }
+  sort(ordered_cases.begin(), ordered_cases.end(), cmp);
+
+  for (vector<pair<Case, int>>::iterator it = ordered_cases.begin(); it != ordered_cases.end(); ++it) {
+    int next_case_label = label_num++;
+    int low_tag = it->second;
+    int high_tag = e.ct->find_smallest_classtag(it->first->get_type());
+
+    emit_blti(T3, low_tag, next_case_label, s);
+    emit_bgti(T3, high_tag, next_case_label, s);
+    emit_push(ACC, s);
+    e.vars_table[it->first->get_name()] = e.stack_num++;
+
+    it->first->code(s, e);
+
+    emit_addiu(SP, SP, 4, s);
+    e.vars_table.erase(it->first->get_name());
+    --e.stack_num;
+
+    emit_branch(ret_label, s);
+    emit_label_def(next_case_label, s);
+  }
+  emit_jal("_case_abort", s);
+
+  emit_label_def(ret_label, s);
 }
 
-void plus_class::code(ostream &s) {
+void block_class::code(ostream &s, env& e) {
+  for (int i = body->first(); body->more(i); i = body->next(i)) {
+    body->nth(i)->code(s, e);
+  }
 }
 
-void sub_class::code(ostream &s) {
+void let_class::code(ostream &s, env& e) {
+  if (init->is_empty()) {
+    if (type_decl == Int) {
+      emit_load_int(ACC, inttable.lookup_string("0"), s);
+    } else if (type_decl == Bool) {
+      emit_load_bool(ACC, falsebool, s);
+    } else if (type_decl == Str) {
+      emit_load_string(ACC, stringtable.lookup_string(""), s);
+    } else {
+      emit_move(ACC, ZERO, s);
+    }
+  } else {
+    init->code(s, e);
+  }
+  
+  emit_push(ACC, s);
+  e.vars_table[identifier] = e.stack_num++;
+
+  body->code(s, e);
+
+  emit_addiu(SP, SP, 4, s);
+  // delete var
+  e.vars_table.erase(identifier);
+  --e.stack_num;
 }
 
-void mul_class::code(ostream &s) {
+void plus_class::code(ostream &s, env& e) {
+  // fetch expr1, push stack
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+  // fetch expr2, copy, get int value
+  e2->code(s, e);
+  emit_jal(NEW_OBJECT, s);
+  emit_fetch_int(T2, ACC, s);
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+  // add, store to acc
+  emit_add(T1, T1, T2, s);
+  emit_store_int(T1, ACC, s);
 }
 
-void divide_class::code(ostream &s) {
+void sub_class::code(ostream &s, env& e) {
+  // fetch expr1, push stack
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+  // fetch expr2, copy, get int value
+  e2->code(s, e);
+  emit_jal(NEW_OBJECT, s);
+  emit_fetch_int(T2, ACC, s);
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+  // sub, store to acc
+  emit_sub(T1, T1, T2, s);
+  emit_store_int(T1, ACC, s);
 }
 
-void neg_class::code(ostream &s) {
+void mul_class::code(ostream &s, env& e) {
+  // fetch expr1, push stack
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+  // fetch expr2, copy, get int value
+  e2->code(s, e);
+  emit_jal(NEW_OBJECT, s);
+  emit_fetch_int(T2, ACC, s);
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+  // mul, store to acc
+  emit_mul(T1, T1, T2, s);
+  emit_store_int(T1, ACC, s);
 }
 
-void lt_class::code(ostream &s) {
+void divide_class::code(ostream &s, env& e) {
+  // fetch expr1, push stack
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+  // fetch expr2, copy, get int value
+  e2->code(s, e);
+  emit_jal(NEW_OBJECT, s);
+  emit_fetch_int(T2, ACC, s);
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+  // div, store to acc
+  emit_div(T1, T1, T2, s);
+  emit_store_int(T1, ACC, s);
 }
 
-void eq_class::code(ostream &s) {
+void neg_class::code(ostream &s, env& e) {
+  e1->code(s, e);
+  emit_jal(NEW_OBJECT, s);
+  emit_fetch_int(T1, ACC, s);
+  emit_neg(T1, T1, s);
+
+  emit_store_int(T1, ACC, s);
 }
 
-void leq_class::code(ostream &s) {
+void lt_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+
+  e2->code(s, e);
+  emit_fetch_int(T2, ACC, s);
+
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+
+  emit_load_bool(ACC, BoolConst(1), s);
+  // if t1 is less than t2, goto label, a0 is true
+  emit_blt(T1, T2, true_label, s);
+  // t1 is greater than t2, a0 is false
+  emit_load_bool(ACC, BoolConst(0), s);
+  // label
+  emit_label_def(true_label, s);
 }
 
-void comp_class::code(ostream &s) {
+void eq_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+
+  e2->code(s, e);
+  emit_move(T2, ACC, s);
+
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+
+  emit_load_bool(ACC, BoolConst(1), s);
+  emit_beq(T1, T2, true_label, s);
+  emit_load_bool(A1, BoolConst(0), s);
+  emit_jal("equality_test", s);
+
+  emit_label_def(true_label, s);
 }
 
-void int_const_class::code(ostream& s)  
+void leq_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+
+  e1->code(s, e);
+  emit_push(ACC, s);
+  ++e.stack_num;
+
+  e2->code(s, e);
+  emit_fetch_int(T2, ACC, s);
+
+  // pop expr1 from stack, get int value
+  emit_load(T1, 1, SP, s);
+  emit_addiu(SP, SP, 4, s);
+  --e.stack_num;
+  emit_fetch_int(T1, T1, s);
+
+  emit_load_bool(ACC, BoolConst(1), s);
+  // if t1 is less than t2, goto label, a0 is true
+  emit_bleq(T1, T2, true_label, s);
+  // t1 is greater than t2, a0 is false
+  emit_load_bool(ACC, BoolConst(0), s);
+  // label
+  emit_label_def(true_label, s);
+}
+
+void comp_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+  // fetch operand
+  e1->code(s, e);
+  emit_fetch_bool(T1, ACC, s);
+
+  emit_load_bool(ACC, BoolConst(1), s);
+  // if operand is 0, goto label, a0 is true
+  emit_beqz(T1, true_label, s);
+  // operand is 1, a0 is false
+  emit_load_bool(ACC, BoolConst(0), s);
+  // label
+  emit_label_def(true_label, s);
+}
+
+void int_const_class::code(ostream& s, env& e)  
 {
   //
   // Need to be sure we have an IntEntry *, not an arbitrary Symbol
@@ -936,26 +1529,79 @@ void int_const_class::code(ostream& s)
   emit_load_int(ACC,inttable.lookup_string(token->get_string()),s);
 }
 
-void string_const_class::code(ostream& s)
+void string_const_class::code(ostream& s, env& e)
 {
   emit_load_string(ACC,stringtable.lookup_string(token->get_string()),s);
 }
 
-void bool_const_class::code(ostream& s)
+void bool_const_class::code(ostream& s, env& e)
 {
   emit_load_bool(ACC, BoolConst(val), s);
 }
 
-void new__class::code(ostream &s) {
+void new__class::code(ostream &s, env& e) {
+  if (type_name == SELF_TYPE) {
+    // todo
+    emit_load_address(T1, CLASSOBJTAB, s);
+    emit_load(T2, 0, SELF, s);
+    emit_sll(T2, T2, 3, s);
+    emit_addu(T1, T1, T2, s);
+
+    // save T1
+    emit_push(T1, s);
+    ++e.stack_num;
+
+    emit_load(ACC, 0, T1, s);
+    emit_jal(NEW_OBJECT, s);
+
+    // pop T1 from stack
+    emit_load(T1, 1, SP, s);
+    emit_addiu(SP, SP, 4, s);
+    --e.stack_num;
+
+    emit_load(T1, 1, T1, s);
+    emit_jalr(T1, s);
+  } else {
+    emit_partial_load_address(ACC, s); emit_protobj_ref(type_name, s); s << endl;
+    emit_jal(NEW_OBJECT, s);
+    s << JAL << ' '; emit_init_ref(type_name, s); s << endl;
+  }
+  
 }
 
-void isvoid_class::code(ostream &s) {
+void isvoid_class::code(ostream &s, env& e) {
+  int true_label = label_num++;
+
+  e1->code(s, e);
+  emit_move(T1, ACC, s);
+
+  emit_load_bool(ACC, BoolConst(1), s);
+  // if operand is void, goto label, a0 is true
+  emit_beqz(T1, true_label, s);
+  // operand is not void, a0 is false
+  emit_load_bool(ACC, BoolConst(0), s);
+  // label
+  emit_label_def(true_label, s);
 }
 
-void no_expr_class::code(ostream &s) {
+void no_expr_class::code(ostream &s, env& e) {
+  emit_move(ACC, ZERO, s);
 }
 
-void object_class::code(ostream &s) {
+void object_class::code(ostream &s, env& e) {
+  int idx;
+
+  if ((idx = find_var_in_env(name, e)) != -1) {
+    emit_load(ACC, idx, SP, s);
+  } else if ((idx = find_param_in_env(name, e)) != -1) {
+    emit_load(ACC, FRAME_PARAMS + idx, FP, s);
+  } else if ((idx = find_attr_in_env(name, e)) != -1) {
+    emit_load(ACC, DEFAULT_OBJFIELDS + idx, SELF, s);
+  } else if (name == self) {
+    emit_move(ACC, SELF, s);
+  } else {
+    cout << "Error: " << this->get_line_number() << " Can't find variable " << name << "!\n";
+  }
 }
 
 

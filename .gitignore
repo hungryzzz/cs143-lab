@@ -1,3 +1,6 @@
 grading/
 
 test*
+.vscode/
+
+*.o
